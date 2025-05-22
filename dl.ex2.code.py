@@ -12,8 +12,8 @@ seq_len = 15
 embed_size = 200
 hidden_size = 200
 num_layers = 2
-num_epochs = 1
-lstm_lr = 15
+num_epochs = 20
+lstm_lr = 18
 transformer_lr = 0.001
 
 bptt = seq_len  # for positional encoding
@@ -194,8 +194,10 @@ def run_training(model, dropout_label, is_transformer=False, lr=lstm_lr):
         train_ppls.append(train_ppl)
         valid_ppls.append(valid_ppl)
         print(f"[{dropout_label}] Epoch {epoch}: Train PPL = {train_ppl:.2f}, Valid PPL = {valid_ppl:.2f}")
-        if not is_transformer and epoch >= 5:
-            lr *= 0.4
+        if not is_transformer and epoch >= 6:
+            lr *= 0.5
+            if epoch >= 10:
+                lr *= 0.8
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
     return train_ppls, valid_ppls
