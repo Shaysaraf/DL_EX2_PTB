@@ -7,18 +7,17 @@ from collections import Counter
 from tqdm import tqdm
 
 # Settings
-batch_size = 20
+batch_size = 15
 seq_len = 15
 embed_size = 200
 hidden_size = 200
 num_layers = 2
 num_epochs = 20
-lstm_lr = 18
-transformer_lr = 0.001
-
-bptt = seq_len  # for positional encoding
+lstm_lr = 15
+transformer_lr = 0.1
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+bptt = seq_len
 
 # Load and preprocess data
 def preprocess_data(file_path):
@@ -70,7 +69,7 @@ def repackage_hidden(h):
 def get_batch(source, i, seq_len, batch_size):
     seq_start = i * seq_len
     seq_end = seq_start + seq_len
-    data = source[:, seq_start:seq_end]  # [batch_size, seq_len]
+    data = source[:, seq_start:seq_end]
     target = source[:, seq_start + 1:seq_end + 1]
     return data, target
 
@@ -112,13 +111,13 @@ def evaluate(model, data, loss_fn, batch_size, seq_len, is_transformer=False):
             total_loss += loss.item()
     return total_loss / num_batches, calculate_perplexity(total_loss / num_batches)
 
-# LSTM Model
+# LSTM (Zaremba-style) Model
 class LSTMModel(nn.Module):
     def __init__(self, vocab_size, embed_size, hidden_size, num_layers, dropout):
         super().__init__()
+        self.drop = nn.Dropout(dropout)
         self.encoder = nn.Embedding(vocab_size, embed_size)
-        self.dropout = nn.Dropout(dropout)
-        self.lstm = nn.LSTM(embed_size, hidden_size, num_layers, dropout=dropout, batch_first=True)
+        self.lstm = nn.LSTM(embed_size, hidden_size, num_layers, dropout=dropout)
         self.decoder = nn.Linear(hidden_size, vocab_size)
         self.init_weights()
         self.hidden_size = hidden_size
@@ -131,10 +130,10 @@ class LSTMModel(nn.Module):
         self.decoder.bias.data.zero_()
 
     def forward(self, input, hidden):
-        emb = self.dropout(self.encoder(input))
+        emb = self.drop(self.encoder(input))  # [seq_len, batch_size, embed_size]
         output, hidden = self.lstm(emb, hidden)
-        output = self.dropout(output)
-        decoded = self.decoder(output.reshape(output.size(0) * output.size(1), output.size(2)))
+        output = self.drop(output)  # dropout between layers
+        decoded = self.decoder(output.reshape(output.size(0)*output.size(1), output.size(2)))
         return decoded.view(output.size(0), output.size(1), decoded.size(1)), hidden
 
     def init_hidden(self, batch_size):
@@ -142,7 +141,7 @@ class LSTMModel(nn.Module):
         return (weight.new_zeros(self.num_layers, batch_size, self.hidden_size),
                 weight.new_zeros(self.num_layers, batch_size, self.hidden_size))
 
-# Transformer Model
+# Transformer model
 class TransformerModel(nn.Module):
     def __init__(self, vocab_size):
         super().__init__()
@@ -179,8 +178,7 @@ def plot_perplexity(results, title, save_path):
     plt.savefig(save_path)
     plt.show()
 
-# ============ Train Models ============
-
+# Training runner
 def run_training(model, dropout_label, is_transformer=False, lr=lstm_lr):
     model = model.to(device)
     optimizer = optim.SGD(model.parameters(), lr=lr)
@@ -196,28 +194,28 @@ def run_training(model, dropout_label, is_transformer=False, lr=lstm_lr):
         print(f"[{dropout_label}] Epoch {epoch}: Train PPL = {train_ppl:.2f}, Valid PPL = {valid_ppl:.2f}")
         if not is_transformer and epoch >= 6:
             lr *= 0.5
-            if epoch >= 10:
-                lr *= 0.8
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
     return train_ppls, valid_ppls
 
+# ========== Run Experiments ==========
+
 results = []
 
-# Model 1: LSTM without dropout
+# Zaremba-style LSTM without dropout
 model1 = LSTMModel(vocab_size, embed_size, hidden_size, num_layers, dropout=0.0)
 train1, valid1 = run_training(model1, "LSTM (no dropout)", is_transformer=False, lr=lstm_lr)
 results.append(("LSTM (no dropout)", train1, valid1))
 
-# Model 2: LSTM with dropout
+# Zaremba-style LSTM with 0.5 dropout
 model2 = LSTMModel(vocab_size, embed_size, hidden_size, num_layers, dropout=0.5)
 train2, valid2 = run_training(model2, "LSTM (dropout 0.5)", is_transformer=False, lr=lstm_lr)
 results.append(("LSTM (dropout 0.5)", train2, valid2))
 
-# Model 3: Transformer
+# Transformer baseline
 model3 = TransformerModel(vocab_size)
 train3, valid3 = run_training(model3, "Transformer", is_transformer=True, lr=transformer_lr)
 results.append(("Transformer", train3, valid3))
 
-# Plot all
+# Plot results
 plot_perplexity(results, "Train vs Valid Perplexity Comparison", "all_models_perplexity.png")
