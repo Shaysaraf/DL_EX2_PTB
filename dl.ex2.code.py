@@ -237,7 +237,7 @@ def plot_perplexity(results, title, save_path):
     plt.savefig(save_path)
     plt.show()
 
-# ========== Run Experiments ==========
+# ========== Run Experiments =========
 
 results = []
 
