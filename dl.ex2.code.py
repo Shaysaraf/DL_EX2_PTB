@@ -1,3 +1,5 @@
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -13,10 +15,11 @@ bptt = seq_len  # For Transformer positional encoding
 embed_size = 200
 hidden_size = 200
 num_layers = 2
-num_epochs = 15
+num_epochs_lstm = 15
+num_epochs_transformer = 12
 lstm_nodrop_lr = 3
 lstm_drop_lr = 10
-transformer_lr = 0.1
+transformer_lr = 0.0015
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -136,27 +139,36 @@ def evaluate(model, data, loss_fn, batch_size, seq_len):
             total_loss += loss.item()
     return total_loss / num_batches, calculate_perplexity(total_loss / num_batches)
 
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1).float()
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.pe = pe.unsqueeze(0)  # Shape: (1, max_len, d_model)
+
+    def forward(self, x):
+        x = x + self.pe[:, :x.size(1)].to(x.device)
+        return x
+
 class TransformerModel(nn.Module):
-    def __init__(self, vocab_size):
+    def __init__(self, vocab_size, embed_size=128, num_layers=2, num_heads=2, ff_dim=256, dropout=0.0):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_size)
-        self.pos_encoder = nn.Parameter(torch.zeros(1, bptt, embed_size))
-        encoder_layers = nn.TransformerEncoderLayer(embed_size, nhead=2, dim_feedforward=512, dropout=0.0, batch_first=True)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=2)
-        self.decoder = nn.Linear(embed_size, vocab_size)
-        self.init_weights()
+        self.pos_encoding = PositionalEncoding(embed_size)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_size, nhead=num_heads, dim_feedforward=ff_dim, dropout=dropout, batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.fc_out = nn.Linear(embed_size, vocab_size)
 
-    def init_weights(self):
-        initrange = 0.1
-        self.embedding.weight.data.uniform_(-initrange, initrange)
-        self.decoder.bias.data.zero_()
-        self.decoder.weight.data.uniform_(-initrange, initrange)
+    def forward(self, x, src_key_padding_mask=None):
+        x = self.embedding(x) * math.sqrt(self.embedding.embedding_dim)
+        x = self.pos_encoding(x)
+        x = self.transformer(x, src_key_padding_mask=src_key_padding_mask)
+        return self.fc_out(x)
 
-    def forward(self, src):
-        src = self.embedding(src) + self.pos_encoder[:, :src.size(1), :]
-        output = self.transformer_encoder(src)
-        output = self.decoder(output.reshape(-1, output.size(2)))
-        return output, None
+
 
 def train_epoch_transformer(model, data, optimizer, loss_fn, batch_size, seq_len):
     model.train()
@@ -166,8 +178,8 @@ def train_epoch_transformer(model, data, optimizer, loss_fn, batch_size, seq_len
         inputs, targets = get_batch(data, i, seq_len, batch_size)
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
-        outputs, _ = model(inputs)
-        loss = loss_fn(outputs, targets.reshape(-1))
+        outputs = model(inputs)
+        loss = loss_fn(outputs.reshape(-1, outputs.size(-1)), targets.reshape(-1))
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5)
         optimizer.step()
@@ -182,12 +194,13 @@ def evaluate_transformer(model, data, loss_fn, batch_size, seq_len):
         for i in range(num_batches):
             inputs, targets = get_batch(data, i, seq_len, batch_size)
             inputs, targets = inputs.to(device), targets.to(device)
-            outputs, _ = model(inputs)
-            loss = loss_fn(outputs, targets.reshape(-1))
+            outputs = model(inputs)
+            loss = loss_fn(outputs.reshape(-1, outputs.size(-1)), targets.reshape(-1))
             total_loss += loss.item()
     return total_loss / num_batches, calculate_perplexity(total_loss / num_batches)
 
-def run_training(model, label, test_data, is_transformer=False, lr=None):
+
+def run_training(model, label, num_epochs, test_data, is_transformer=False, lr=None):
     model = model.to(device)
     optimizer = optim.SGD(model.parameters(), lr=lr) if not is_transformer else optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.CrossEntropyLoss()
@@ -215,7 +228,7 @@ def plot_perplexity(results, title, save_path):
     plt.figure(figsize=(10, 6))
     for label, train_ppls, test_ppls in results:
         plt.plot(range(1, len(train_ppls) + 1), train_ppls, label=f'{label} Train')
-        plt.plot(range(1, len(test_ppls) + 1), test_ppls, linestyle='--', label=f'{label} Test')
+        plt.plot(range(1, len(test_ppls) + 1), linestyle='--', label=f'{label} Test')
     plt.title(title)
     plt.xlabel('Epoch')
     plt.ylabel('Perplexity')
@@ -228,20 +241,20 @@ def plot_perplexity(results, title, save_path):
 
 results = []
 
-# Train LSTM without dropout
-#model1 = ZarembaLSTM(vocab_size, embed_size, hidden_size, num_layers, dropout=0.0)
-#train1, test1 = run_training(model1, "LSTM (no dropout)", test_data, lr=lstm_nodrop_lr)
-#results.append(("LSTM (no dropout)", train1, test1))
 
-# Train LSTM with dropout
-#model2 = ZarembaLSTM(vocab_size, embed_size, hidden_size, num_layers, dropout=0.3)
-#train2, test2 = run_training(model2, "LSTM (dropout 0.3)", test_data, lr=lstm_drop_lr)
-#results.append(("LSTM (dropout 0.5)", train2, test2))
+# LSTM without dropout
+model1 = ZarembaLSTM(vocab_size, embed_size, hidden_size, num_layers, dropout=0.0)
+train1, test1 = run_training(model1, "LSTM (no dropout)", num_epochs_lstm, test_data, lr=lstm_nodrop_lr)
+results.append(("LSTM (no dropout)", train1, test1))
 
-# Transformer baseline
-model3 = TransformerModel(vocab_size)
-train3, test3 = run_training(model3, "Transformer", test_data, is_transformer=True, lr=transformer_lr)
+# LSTM with dropout
+model2 = ZarembaLSTM(vocab_size, embed_size, hidden_size, num_layers, dropout=0.3)
+train2, test2 = run_training(model2, "LSTM (dropout 0.3)", num_epochs_lstm, test_data, lr=lstm_drop_lr)
+results.append(("LSTM (dropout 0.3)", train2, test2))
+
+# Transformer
+model3 = TransformerModel(vocab_size, embed_size, num_heads=2, num_layers=2, dropout=0.5)
+train3, test3 = run_training(model3, "Transformer", num_epochs_transformer, test_data, is_transformer=True, lr=transformer_lr)
 results.append(("Transformer", train3, test3))
 
-# Plot results
 plot_perplexity(results, "Train vs Test Perplexity Comparison", "all_models_perplexity.png")
